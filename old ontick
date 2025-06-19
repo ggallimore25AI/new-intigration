@@ -1,0 +1,537 @@
+void OnTick() {
+    // === Strictness: Set per Tolerance level ===
+    switch(Tolerance)
+    {
+        case BASIC:
+            minConfluence     = 1;
+            minPinBarStrength = 1;
+            break;
+        case ADVANCED:
+            minConfluence     = 2;
+            minPinBarStrength = 2;
+            break;
+        case PRO:
+        default:
+            minConfluence     = 3;
+            minPinBarStrength = 3;
+            break;
+    }
+
+
+
+
+
+//
+   // Constants for drawing offsets (can be fine-tuned)
+   int textAnchorBarsOffset = 2;  // How many bars from current time to anchor the text
+   int arrowAnchorBarsOffset = 5; // How many bars from current time to anchor the arrow (should be > textAnchorBarsOffset)
+   double verticalTextOffsetInPips = 1.5; // How many pips above/below the zone to place the text
+   //MarketStructureInfo analitics
+   ENUM_TIMEFRAMES trendTF, entryTF;
+   GetTimeframesForStyle(TraderStyle, trendTF, entryTF, _Period);
+   
+   if(TraderStyle == TRADER_SCALPER) {
+       Print("Scalper logic executing. Checking for trade setup...");
+       // Print details about all conditions checked
+   }
+   // Always analyze trend on the alignment timeframe!
+   MarketStructureInfo msTrend = AnalyzeMarketStructure(_Symbol, trendTF);
+   // Analyze entry signals (zones, confluence) on the lower/entry timeframe
+   MarketStructureInfo msEntry = AnalyzeMarketStructure(_Symbol, entryTF);
+   
+   // Use msTrend for overall direction, msEntry for actual entry signal
+   bool validBuy = false, validSell = false;
+   //
+   CleanupBuyZones();
+   CleanupSellZones();
+  // NEW, CORRECTED call in OnTick
+    MasterManageAllTrades(trendTF);
+   // by gemini
+   // --- 3. Run Analysis & Get Dynamic Settings (INTEGRATION) ---
+    MarketStructureInfo ms = AnalyzeMarketStructure(_Symbol, _Period);
+    double atr = GetATR(_Symbol, _Period);
+    double adr = GetADR(_Symbol, _Period);
+    TraderStyleSettings settings = GetTraderStyleSettings(TraderStyle, _Period, atr, adr, ms);
+   //
+         // Fill your MarketStructureInfo (ms) first
+     
+      // --- Step 2: Detect and collect active patterns
+
+    BuildDetectedPatterns(msEntry, detectedPatterns, detectedCount); // Populates the list of active patterns
+   //
+    IdentifyAndDrawZones(ms, _Period);
+    CleanupBuyZones();
+    CleanupSellZones();
+   //
+   TrendType trend = GetCurrentTrend(_Symbol, _Period, FastMAPeriod, SlowMAPeriod);
+   double lastPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID); // Current market price
+
+   datetime t1_label = iTime(_Symbol, _Period, 1); // For confirmed entry label
+
+   if (buyTicket > 0)
+      ManageActiveTrade(buyTicket, SIGNAL_BUY, buyEntryPrice_actual, TrailStartPips, TrailStepPips, BreakEvenPips);
+    //ManageActiveTrade(buyTicket, SIGNAL_BUY, tradeEntryPrice_actual, TrailStartPips, TrailStepPips, BreakEvenPips);
+   if (sellTicket > 0)
+       //ManageActiveTrade(sellTicket, SIGNAL_SELL, tradeEntryPrice_actual, TrailStartPips, TrailStepPips, BreakEvenPips);
+       ManageActiveTrade(sellTicket, SIGNAL_SELL, sellEntryPrice_actual, TrailStartPips, TrailStepPips, BreakEvenPips);
+   //
+
+   // Variables from "live ontick 2.txt"
+   string trendText, entryZoneText, riskText = "";
+   double entryPrice = 0, price1 = 0, price2 = 0, centerPrice = 0; // 'entryPrice' will be FindSwingLow/High
+   color labelColor = clrNONE;
+   double stopLoss = 0, takeProfit = 0; // 'stopLoss' and 'takeProfit' are used for GetDynamicSLTP and panel
+   double takeProfit1 = 0, takeProfit2 = 0; // For GetDynamicSLTP output and message
+   double stopDistance = 0, stopDistancePips = 0;
+   double tpDistance = 0, tpDistancePips = 0;
+   
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double pointValue = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double currentPipSize = (pipSize <= 0 || pipSize < pointValue) ? pointValue : pipSize;
+   if (currentPipSize == 0) currentPipSize = 0.0001; // Fallback
+
+   double pipValuePerLot = 0;
+   if (tickSize > 0) { 
+        pipValuePerLot = tickValue * (currentPipSize / tickSize);
+   } else if (pointValue > 0) { 
+        pipValuePerLot = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE_PROFIT) * (currentPipSize / pointValue);
+   }
+   if (pipValuePerLot == 0) { 
+        Print("Warning: pipValuePerLot is zero. Check pipSize, tickSize, tickValue for symbol ", _Symbol);
+   }
+
+   double slPips = 20.0; 
+   double tpPips = 50.0;
+
+   bool buyConfirmed = false;
+   bool sellConfirmed = false;
+   double lastBarClose = iClose(_Symbol, _Period, 1); 
+   double lastBarLow = iLow(_Symbol, _Period, 1);
+   double lastBarHigh = iHigh(_Symbol, _Period, 1);
+
+   // --- Main Zone Identification and Trade Entry Logic (from "live ontick 2.txt") ---
+   if (msTrend.isTrend && msTrend.trendDirection == TREND_BULLISH) {//
+      trendText = "BULLISH 📈";
+      entryPrice = FindSwingLow(_Symbol, _Period, SwingLookback); // 'entryPrice' is the swing low
+      price1 = entryPrice * (1 - ZoneWidthPct / 100.0); 
+      price2 = entryPrice * (1 + ZoneWidthPct / 100.0); 
+      centerPrice = (price1 + price2) / 2.0;
+      entryZoneText = "Next Buy Zone (" + DoubleToString(price1, _Digits) + "-" + DoubleToString(price2, _Digits) + ")";
+      labelColor = clrDarkSeaGreen;
+
+      datetime currentTime = TimeCurrent();
+      datetime textTime = currentTime + PeriodSeconds(_Period) * textAnchorBarsOffset;
+      datetime arrowTime = currentTime + PeriodSeconds(_Period) * arrowAnchorBarsOffset;
+      double textVerticalPrice = price1 - (verticalTextOffsetInPips * currentPipSize); 
+
+      DrawZone("BUY_ZONE", price1, price2, ColorToARGB(clrDeepSkyBlue, 70));
+      DrawZoneText("BUY_ZONE_TEXT", textTime, textVerticalPrice, "BUY ZONE HERE!", clrDeepSkyBlue, 14);
+      DrawZoneArrow("BUY_ZONE_ARROW", arrowTime, centerPrice, 233, clrGreen); 
+      
+      bool basePatternOccurred = IsBullishEngulfing(_Symbol, _Period, 1) || IsBullishPinBar(_Symbol, _Period, 1);
+
+      if (basePatternOccurred) {
+          Print("Base Bullish Pattern Occurred on bar 1.");
+          bool inZone = (lastBarLow >= price1 && lastBarLow <= price2); 
+          if (inZone) {
+              Print("Pattern in Buy Zone.");
+             
+             if (UseProLevelConfirmations) {
+                int bestScenarioIndex = FindBestScenario("bullish"); // Check if detected patterns match a bullish scenario 
+                
+                  ConfluenceResult conf = MasterConfluenceCheck(msEntry, price1, price2, 1, entryTF, trendTF, minConfluence);
+                  if ((conf.isTier1 || conf.tier2Count >= minConfluence) && bestScenarioIndex != -1 && !buySignalSent) {
+                    buyConfirmed = true;
+                    Print("BUY Confirmed by MasterConfluenceCheck.");
+                  } else {
+                      Print("MasterConfluenceCheck FAILED for BUY.");
+                  }
+              } else {
+                  buyConfirmed = true;
+                  Print("BUY Confirmed (Pro-Level OFF).");
+              }
+          } else {
+             Print("Pattern NOT in Buy Zone. LastBarLow:", DoubleToString(lastBarLow,_Digits), " Zone:", DoubleToString(price1,_Digits), "-", DoubleToString(price2,_Digits));
+          }
+      }
+           
+      for(int i = 0; i < ArraySize(buyZones); i++) {
+          if(!buyZones[i].active) continue;
+      
+          double zoneLow  = buyZones[i].price1;
+          double zoneHigh = buyZones[i].price2;
+          double lastPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      
+          // Check price inside zone
+          if(lastPrice < zoneLow || lastPrice > zoneHigh) continue;
+      
+          // Only enter if higher timeframe trend is bullish
+          if(!(msTrend.isTrend && msTrend.trendDirection == TREND_BULLISH)) continue;
+      
+          // Run confluence check
+            ConfluenceResult buyConf = MasterConfluenceCheck(msEntry, zoneLow, zoneHigh, 1, entryTF, trendTF, minConfluence);
+      
+          if((buyConf.isTier1 || buyConf.tier2Count >= minConfluence) && !buySignalSent) {
+              double entryPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+              GetDynamicSLTP(true, stopLoss, takeProfit1, takeProfit2);
+      
+              string styleNames[4] = {"Scalper", "Day Trader", "Swing Trader", "Position Trader"};
+              string traderStyleText = styleNames[TraderStyle];
+
+              string risk = (buyConf.isTier1) ? "Medium" : (buyConf.tier2Count >= 3) ? "High" : "Low";
+              string msg =
+                  "🟢 SAMUEWE SIGNAL!\n"
+                  "BUY entry confirmed!\n"
+                  "Symbol: " + _Symbol + "\n"
+                  "Timeframe: " + EnumToString(entryTF) + "\n"
+                  "Entry: " + DoubleToString(entryPrice, _Digits) + "\n"
+                  "SL: " + DoubleToString(stopLoss, _Digits) + "\n"
+                  "TP1: " + DoubleToString(takeProfit1, _Digits) + ((takeProfit2 > 0.0) ? ("\nTP2: " + DoubleToString(takeProfit2, _Digits)) : "") + "\n"
+                  + (buyConf.isTier1 ? "Tier 1 Confluence: " + buyConf.confluenceNames + "\n" : "")
+                  + (buyConf.tier2Count > 0 ? "Tier 2 Confluences: " + IntegerToString(buyConf.tier2Count) + " (" + buyConf.confluenceNames + ")\n" : "")
+                  + "Trader Style: " + traderStyleText + "\n"
+                  + "Risk: " + risk + "\n"
+                  "🚀 Let’s go!";
+      
+              double lot = CalculateOptimalLot(entryPrice, stopLoss, ORDER_TYPE_BUY);
+              buyTicket = PlaceValidatedOrder(true);
+      
+              ManageActiveTrade(buyTicket, SIGNAL_BUY, entryPrice, TrailStartPips, TrailStepPips, BreakEvenPips);
+      
+              if(buyEntryCount < MaxEntriesPerSignal) {
+                  if(!buyAlertSent) {
+                      Alert(msg);
+                      SendTelegramMessage(msg);
+                      buyAlertSent = true;
+                      sellAlertSent = false;
+                      buyEntryCount++;
+                      sellEntryCount = 0;
+                  }
+              } else buyAlertSent = false;
+      
+              if(!buyLogged) {
+                  LogSAMUEWE_Signal(_Symbol, EnumToString(entryTF), "Buy");
+                  buyLogged = true;
+              }
+              DrawRectLabel("BUY_ENTRY_CONFIRMED", t1_label, entryPrice - 3 * currentPipSize, "✅ BUY CONFIRMED", clrLimeGreen, clrBlack, 16); 
+      
+              if (buyConf.tier2Count >= 7 || buyConf.isTier1)
+                  SendTelegramGIF("https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExZ3llajhjaGRrMnBrZXNzazRuNnM5YXc2N3ppN2dpZWx1a2ppMm9vciZjdD1n/L05HgB2h6qICDs5Sms/giphy.gif");
+              if (buyConf.confluenceNames.Find("Engulfing") == 0)
+                  SendTelegramSticker("CAACAgUAAxkBAAEBd7JlJ2jv-1wphgfiZFVWlbn3OnKvKwACiwEAAvPlgVQXpQ1HIWjE6y8E");
+      
+              buySignalSent = true;
+              break; // Only one entry per tick/zone
+          } else {
+              ObjectDelete(0,"BUY_ENTRY_CONFIRMED");
+              if(msTrend.trendDirection == TREND_BULLISH && !buySignalSent) buySignalSent = false; 
+              buyLogged = false;
+          }
+      }
+      // SL/TP for panel based on 'entryPrice' (swing low) and fixed pips
+      stopLoss = entryPrice - slPips * currentPipSize; 
+      takeProfit = entryPrice + tpPips * currentPipSize; 
+      
+      ObjectDelete(0, "SELL_ZONE"); 
+      ObjectDelete(0, "SELL_ENTRY_CONFIRMED");
+      ObjectDelete(0, "SELL_ZONE_TEXT");
+      ObjectDelete(0, "SELL_ZONE_ARROW");
+
+   } else if (msTrend.isTrend && msTrend.trendDirection == TREND_BEARISH) {
+      trendText = "BEARISH 📉";
+      entryPrice = FindSwingHigh(_Symbol, _Period, SwingLookback); // 'entryPrice' is the swing high
+      price1 = entryPrice * (1 - ZoneWidthPct / 100.0); 
+      price2 = entryPrice * (1 + ZoneWidthPct / 100.0); 
+      centerPrice = (price1 + price2) / 2.0;
+      entryZoneText = "Next Sell Zone (" + DoubleToString(price1, _Digits) + "-" + DoubleToString(price2, _Digits) + ")";
+      labelColor = clrIndianRed;
+
+      datetime currentTime = TimeCurrent();
+      datetime textTime = currentTime + PeriodSeconds(_Period) * textAnchorBarsOffset;
+      datetime arrowTime = currentTime + PeriodSeconds(_Period) * arrowAnchorBarsOffset;
+      double textVerticalPrice = price2 + (verticalTextOffsetInPips * currentPipSize); 
+
+      DrawZone("SELL_ZONE", price1, price2, ColorToARGB(clrRed, 70));
+      DrawZoneText("SELL_ZONE_TEXT", textTime, textVerticalPrice, "SELL ZONE HERE!", clrRed, 14);
+      DrawZoneArrow("SELL_ZONE_ARROW", arrowTime, centerPrice, 234, clrRed); 
+      
+      bool basePatternOccurred = IsBearishEngulfing(_Symbol, _Period, 1) || IsBearishPinBar(_Symbol, _Period, 1);
+
+      if (basePatternOccurred) {
+          Print("Base Bearish Pattern Occurred on bar 1.");
+          bool inZone = (lastBarHigh >= price1 && lastBarHigh <= price2); 
+          if (inZone) {
+              Print("Pattern in Sell Zone.");
+              if (UseProLevelConfirmations) {
+                int bestScenarioIndex = FindBestScenario("bearish"); 
+                  // NEW, CORRECTED call
+                    ConfluenceResult conf = MasterConfluenceCheck(msEntry, price1, price2, 1, entryTF, trendTF, minConfluence);
+                  if ((conf.isTier1 || conf.tier2Count >= minConfluence) && bestScenarioIndex != -1 && !buySignalSent) {
+                    sellConfirmed = true;
+                    Print("Trade validated by Scenario: ", allScenarios[bestScenarioIndex].name);
+                    Print("SELL Confirmed by MasterConfluenceCheck.");
+                  } else {
+                      Print("MasterConfluenceCheck FAILED for SELL.");
+                  }
+              } else {
+                  sellConfirmed = true;
+                  Print("SELL Confirmed (Pro-Level OFF).");
+              }
+          } else {
+              Print("Pattern NOT in Sell Zone. LastBarHigh:", DoubleToString(lastBarHigh,_Digits), " Zone:", DoubleToString(price1,_Digits), "-", DoubleToString(price2,_Digits));
+          }
+      }
+      
+      for(int i = 0; i < ArraySize(sellZones); i++) {
+          if(!sellZones[i].active) continue;
+      
+          double zoneLow  = sellZones[i].price1;
+          double zoneHigh = sellZones[i].price2;
+          double lastPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      
+          // Check price inside zone
+          if(lastPrice < zoneLow || lastPrice > zoneHigh) continue;
+      
+          // Only enter if higher timeframe trend is bearish
+          if(!(msTrend.isTrend && msTrend.trendDirection == TREND_BEARISH)) continue;
+      
+          // Run confluence check
+          ConfluenceResult sellConf = MasterConfluenceCheck(msEntry, zoneLow, zoneHigh, 1, entryTF, trendTF, minConfluence);
+            int bestScenarioIndex = FindBestScenario("bearish");  
+          if ((sellConf.isTier1 || sellConf.tier2Count >= minConfluence) && bestScenarioIndex != -1 && !sellSignalSent) {
+              double entryPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+              GetDynamicSLTP(false, stopLoss, takeProfit1, takeProfit2);
+               Print("Trade validated by Scenario: ", allScenarios[bestScenarioIndex].name);
+              string styleNames[4] = {"Scalper", "Day Trader", "Swing Trader", "Position Trader"};
+              string traderStyleText = styleNames[TraderStyle];
+
+              string risk = (sellConf.isTier1) ? "Medium" : (sellConf.tier2Count >= 3) ? "High" : "Low";
+              string msg =
+                  "🔴 SAMUEWE SIGNAL!\n"
+                  "SELL entry confirmed!\n"
+                  "Symbol: " + _Symbol + "\n"
+                  "Timeframe: " + EnumToString(entryTF) + "\n"
+                  "Entry: " + DoubleToString(entryPrice, _Digits) + "\n"
+                  "SL: " + DoubleToString(stopLoss, _Digits) + "\n"
+                  "TP1: " + DoubleToString(takeProfit1, _Digits) + ((takeProfit2 > 0.0) ? ("\nTP2: " + DoubleToString(takeProfit2, _Digits)) : "") + "\n"
+                  + (sellConf.isTier1 ? "Tier 1 Confluence: " + sellConf.confluenceNames + "\n" : "")
+                  + (sellConf.tier2Count > 0 ? "Tier 2 Confluences: " + IntegerToString(sellConf.tier2Count) + " (" + sellConf.confluenceNames + ")\n" : "")
+                  + "Trader Style: " + traderStyleText + "\n"
+                  + "Risk: " + risk + "\n"
+                  "⚡️ Stay sharp!";
+      
+              double lot = CalculateOptimalLot(entryPrice, stopLoss, ORDER_TYPE_SELL);
+              sellTicket = PlaceValidatedOrder(false);
+      
+              ManageActiveTrade(sellTicket, SIGNAL_SELL, entryPrice, TrailStartPips, TrailStepPips, BreakEvenPips);
+      
+              if(sellEntryCount < MaxEntriesPerSignal) {
+                  if(!sellAlertSent) {
+                      Alert(msg);
+                      SendTelegramMessage(msg);
+                      sellAlertSent = true;
+                      buyAlertSent = false;
+                      sellEntryCount++;
+                      buyEntryCount = 0;
+                  }
+              } else sellAlertSent = false;
+      
+              if(!sellLogged) {
+                  LogSAMUEWE_Signal(_Symbol, EnumToString(entryTF), "Sell");
+                  sellLogged = true;
+              }
+              DrawRectLabel("SELL_ENTRY_CONFIRMED", t1_label, entryPrice + 3 * currentPipSize, "✅ SELL CONFIRMED", clrSalmon, clrRed, 16);
+      
+              if (sellConf.tier2Count >= 7 || sellConf.isTier1)
+                  SendTelegramGIF("https://media.giphy.com/media/Yy26NRbpB9lDi/giphy.gif");
+              if (sellConf.confluenceNames.Find("Engulfing") == 0)
+                  SendTelegramSticker("CAACAgUAAxkBAAEBCQdjk_pVTUgN0TkkUJEnprH1AAGf6gACPgADVp29Cj33BrhIf-vPLwQ");
+      
+              sellSignalSent = true;
+              break; // Only one entry per tick/zone
+          } else {
+              ObjectDelete(0,"SELL_ENTRY_CONFIRMED");
+              if(msTrend.trendDirection == TREND_BEARISH && !sellSignalSent) sellSignalSent = false; 
+              sellLogged = false;
+          }
+      }
+                        
+      // SL/TP for panel
+      stopLoss = entryPrice + slPips * currentPipSize; 
+      takeProfit = entryPrice - tpPips * currentPipSize;
+
+      ObjectDelete(0, "BUY_ZONE"); 
+      ObjectDelete(0, "BUY_ENTRY_CONFIRMED");
+      ObjectDelete(0, "BUY_ZONE_TEXT");
+      ObjectDelete(0, "BUY_ZONE_ARROW"); 
+
+   } else { // Sideways trend
+      trendText = "SIDEWAYS ➡️";
+      entryZoneText = "No Entry Zone - Trend is Sideways";
+      entryPrice = 0; 
+      ObjectDelete(0, "BUY_ZONE"); ObjectDelete(0, "SELL_ZONE");
+      ObjectDelete(0, "BUY_ENTRY_CONFIRMED"); ObjectDelete(0, "SELL_ENTRY_CONFIRMED");
+      ObjectDelete(0, "BUY_ZONE_TEXT"); ObjectDelete(0, "SELL_ZONE_TEXT");
+      ObjectDelete(0, "BUY_ZONE_ARROW"); ObjectDelete(0, "SELL_ZONE_ARROW");
+      buySignalSent = false;
+      sellSignalSent = false;
+   }
+   // --- End of Main Zone Identification and Trade Entry Logic ---
+
+   // --- Position Management Logic (from "live ontick 1.txt") ---
+   // This is inserted after new trade entries might have occurred.
+   bool inPosition = PositionSelect(_Symbol);
+   bool isLong = false, isShort = false;
+   double openPrice_pos_mgmt = 0; // Using a distinct name for clarity
+   ulong ticket_pos_mgmt = 0;    // Using a distinct name for clarity
+
+   if(inPosition) {
+       long type_pos_mgmt = PositionGetInteger(POSITION_TYPE);
+       openPrice_pos_mgmt = PositionGetDouble(POSITION_PRICE_OPEN);
+       ticket_pos_mgmt = PositionGetInteger(POSITION_TICKET);
+       isLong  = (type_pos_mgmt == POSITION_TYPE_BUY);
+       isShort = (type_pos_mgmt == POSITION_TYPE_SELL);
+       Print("Position Management: Active position. Type: ", EnumToString((ENUM_POSITION_TYPE)type_pos_mgmt), ", Ticket: ", ticket_pos_mgmt);
+   }
+
+   if (inPosition) {
+       bool exitNow_pos_mgmt = false, holdTrade_pos_mgmt = false;
+       // currPrice for position management is lastPrice (current market price)
+       // currBarClose for position management is lastBarClose (close of bar 1)
+
+       if(isLong) {
+           Print("Position Management: Checking Long position ", ticket_pos_mgmt);
+           if(IsBearishEngulfing(_Symbol, _Period, 1) 
+               && !MasterConfluenceCheck(msEntry, 0, 0, 1, entryTF, trendTF, minConfluence).isTier1) { // Zone params 0,0 as not relevant for this CHOCH check
+               exitNow_pos_mgmt = true; 
+               Print("Position Management: CHOCH/Exit signal for Long ", ticket_pos_mgmt);
+           }
+           if(IsFakeoutBar(_Symbol, _Period, 1, FakeoutMinWickPct)) {
+               holdTrade_pos_mgmt = true; 
+               Print("Position Management: Fakeout detected, holding Long ", ticket_pos_mgmt);
+           }
+           double sl_pos_val = PositionGetDouble(POSITION_SL);
+           double tp_pos_val = PositionGetDouble(POSITION_TP);
+           if (sl_pos_val > 0 && lastPrice <= sl_pos_val) { exitNow_pos_mgmt = true; Print("Position Management: SL hit for Long ", ticket_pos_mgmt);}
+           if (tp_pos_val > 0 && lastPrice >= tp_pos_val) { exitNow_pos_mgmt = true; Print("Position Management: TP hit for Long ", ticket_pos_mgmt);}
+       }
+       else if(isShort) {
+           Print("Position Management: Checking Short position ", ticket_pos_mgmt);
+           if(IsBullishEngulfing(_Symbol, _Period, 1)
+               && !MasterConfluenceCheck(msEntry, 0, 0, 1, entryTF, trendTF, minConfluence).isTier1) {
+               exitNow_pos_mgmt = true; 
+               Print("Position Management: CHOCH/Exit signal for Short ", ticket_pos_mgmt);
+           }
+           if(IsFakeoutBar(_Symbol, _Period, 1, FakeoutMinWickPct)) {
+               holdTrade_pos_mgmt = true;
+               Print("Position Management: Fakeout detected, holding Short ", ticket_pos_mgmt);
+           }
+           double sl_pos_val = PositionGetDouble(POSITION_SL);
+           double tp_pos_val = PositionGetDouble(POSITION_TP);
+           if (sl_pos_val > 0 && lastPrice >= sl_pos_val) { exitNow_pos_mgmt = true; Print("Position Management: SL hit for Short ", ticket_pos_mgmt);}
+           if (tp_pos_val > 0 && lastPrice <= tp_pos_val) { exitNow_pos_mgmt = true; Print("Position Management: TP hit for Short ", ticket_pos_mgmt);}
+       }
+
+       if(exitNow_pos_mgmt && !holdTrade_pos_mgmt) {
+           Print("Position Management: Attempting to close ticket ", ticket_pos_mgmt);
+           if(trade.PositionClose(ticket_pos_mgmt)) { // Assumes 'trade' is a global CTrade object
+               Alert("Trade closed: Setup failed or CHOCH detected, or SL/TP hit.");
+               SendTelegramMessage("SAMUEWE: Trade " + (isLong ? "BUY" : "SELL") + " closed for " + _Symbol + " at " + DoubleToString(lastPrice, _Digits) + ". Ticket: " + (string)ticket_pos_mgmt);
+           } else {
+               Print("Position Management: FAILED to close ticket ", ticket_pos_mgmt, ". Error: ", GetLastError());
+               Alert("Failed to close trade. Error: " + IntegerToString(GetLastError()));
+           }
+       } else if (holdTrade_pos_mgmt) {
+            Print("Position Management: Holding trade ", ticket_pos_mgmt, " due to hold condition.");
+       } else if (exitNow_pos_mgmt && holdTrade_pos_mgmt) { // Should not happen if logic is sequential but good to log
+            Print("Position Management: Exit and Hold both true for ", ticket_pos_mgmt, ". Holding.");
+       } else {
+            // Print("Position Management: No exit/hold condition met for ", ticket_pos_mgmt);
+       }
+   }
+   // --- End of Position Management Logic ---
+
+   // --- Panel Update Logic (from "live ontick 2.txt") ---
+   // 'entryPrice' here refers to the swing high/low for the current trend.
+   // 'stopLoss' and 'takeProfit' here are for panel display based on fixed pips from 'entryPrice'.
+   // Their values from GetDynamicSLTP (used for actual trades) are not used for this panel calculation part.
+   double lotSizeManual_panel = lotSize;
+   double riskManual_panel = 0, rewardManual_panel = 0;
+   double lotSizeAuto_panel = 0, riskAuto_panel = 0, rewardAuto_panel = 0;
+   string statusText_panel = "";
+
+   if (entryPrice != 0 && (trend == TREND_BULLISH || trend == TREND_BEARISH)) { 
+      double panel_calc_sl, panel_calc_tp;
+      if (trend == TREND_BULLISH){
+          panel_calc_sl = entryPrice - slPips * currentPipSize;
+          panel_calc_tp = entryPrice + tpPips * currentPipSize;
+      } else { // Bearish
+          panel_calc_sl = entryPrice + slPips * currentPipSize;
+          panel_calc_tp = entryPrice - tpPips * currentPipSize;
+      }
+      stopDistance = MathAbs(entryPrice - panel_calc_sl); 
+      stopDistancePips = stopDistance / currentPipSize;
+      tpDistance       = MathAbs(entryPrice - panel_calc_tp);
+      tpDistancePips   = tpDistance / currentPipSize;
+
+      if (pipValuePerLot > 0 && stopDistancePips > 0) { 
+         riskManual_panel    = stopDistancePips * pipValuePerLot * lotSizeManual_panel;
+         rewardManual_panel  = tpDistancePips * pipValuePerLot * lotSizeManual_panel;
+         double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+         double maxRiskAllowed = balance * (riskPercentAccount / 100.0);
+         if(stopDistancePips * pipValuePerLot != 0) {
+            lotSizeAuto_panel = maxRiskAllowed / (stopDistancePips * pipValuePerLot);
+         } else {
+            lotSizeAuto_panel = 0;
+         }
+         double minLotBroker = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+         double maxLotBroker = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+         double lotStepBroker = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+         if (lotStepBroker == 0) lotStepBroker = 0.01;
+         lotSizeAuto_panel = MathMax(minLotBroker, MathMin(maxLotBroker, MathFloor(lotSizeAuto_panel / lotStepBroker) * lotStepBroker));
+         if (lotSizeAuto_panel < minLotBroker) lotSizeAuto_panel = 0; 
+         riskAuto_panel   = stopDistancePips * pipValuePerLot * lotSizeAuto_panel;
+         rewardAuto_panel = tpDistancePips * pipValuePerLot * lotSizeAuto_panel;
+         if (riskManual_panel > balance && lotSizeManual_panel > 0) statusText_panel = "❌ Manual lot: Risk exceeds balance!";
+         else if (lotSizeManual_panel > 0) statusText_panel = "✅ Manual lot: Trade possible.";
+         else statusText_panel = "ℹ️ Manual lot: 0.00";
+         if (lotSizeAuto_panel <= 0 || lotSizeAuto_panel < minLotBroker) statusText_panel += "\n❌ Auto lot: Risk too high / Min Lot not met.";
+         else if (riskAuto_panel > balance) statusText_panel += "\n❌ Auto lot: Risk exceeds balance (check SL).";
+         else statusText_panel += "\n✅ Auto lot: Trade possible.";
+      } else {
+         statusText_panel = "⚠️ Error in risk calc (pipValue/SL pips is zero).";
+         stopDistancePips = 0; tpDistancePips = 0; 
+      }
+   } else { 
+       statusText_panel = "No valid entry setup for risk calculation.";
+       stopDistancePips = 0; tpDistancePips = 0; 
+   }
+
+   if(trendPanel != NULL) {
+      trendPanel.UpdateInfo(
+            trendText, _Symbol, EnumToString(_Period), lastPrice, entryZoneText,
+            lotSizeManual_panel, riskManual_panel, rewardManual_panel,
+            lotSizeAuto_panel, riskAuto_panel, rewardAuto_panel,
+            stopDistancePips, tpDistancePips, 
+            statusText_panel
+      );
+   }
+   
+   if(trend != lastTrend && (trend == TREND_BULLISH || trend == TREND_BEARISH)) { 
+      string direction = (trend == TREND_BULLISH ? "BUY: Setup Found" : "SELL: Setup Found");
+      string waitingMsg = "| Waiting For Confirmation...";
+      string zoneDetails = entryZoneText; 
+      string alertMsg =
+         "SAMUEWE SIGNAL!\n"
+         "Trend Change: " + direction +
+         "\n" + waitingMsg +
+         "\nSymbol: " + _Symbol +
+         "\nTimeframe: " + EnumToString(_Period) +
+         "\n" + zoneDetails + 
+         "\nLast Price: " + DoubleToString(lastPrice, _Digits);
+      Alert(alertMsg);
+   }
+   lastTrend = trend;
+   ChartRedraw(0);
+}
